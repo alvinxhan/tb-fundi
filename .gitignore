@@ -1,0 +1,9 @@
+neopatat/__pycache__/
+*/.DS_Store
+.DS_Store
+deprecated/
+figures/
+gauteng/
+jupyter_notebooks/
+.ipynb_checkpoints/
+

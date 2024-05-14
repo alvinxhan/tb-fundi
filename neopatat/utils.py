@@ -42,7 +42,7 @@ def compute_visitor_flux_prob(dist_matrix, popgrid, r = 1, fhome = 1, T = 7):
     return Q
 
 @jit(nopython = True, parallel = True, fastmath = True)
-def compute_rand_transmission(infectious_places, infectious_age, susceptible_places, susceptible_age, setting_contact_mat, infectious_age_commute_f, visitor_flux_prob, beta):
+def compute_rand_transmission(infectious_places, infectious_age, susceptible_places, susceptible_age, setting_contact_mat, infectious_age_commute_f, visitor_flux_prob, beta, hiv_status_of_susceptible_inds, hiv_rr):
 
     n = susceptible_age.size
     exposed_boolean = np.zeros(n, dtype = np.uint8)
@@ -51,10 +51,10 @@ def compute_rand_transmission(infectious_places, infectious_age, susceptible_pla
     for s in prange(n):
         sus_age = susceptible_age[s]
         sus_place = susceptible_places[s]
-
         poisson_mu = -beta * setting_contact_mat[sus_age][infectious_age] * visitor_flux_prob[sus_place][infectious_places] * infectious_age_commute_f
         prob = 1 - np.exp(poisson_mu.sum())
-
+        if hiv_status_of_susceptible_inds[s] > 0:
+            prob = prob * hiv_rr
         if np.random.random() < prob:
             exposed_boolean[s] = 1
 
@@ -70,7 +70,7 @@ def filter_susceptibles(infectious_places, infectious_age, susceptible_places):
     return included_sus_mask
 
 @jit(nopython = True, parallel = True, fastmath = True)
-def compute_transmission(infectious_places, infectious_age, susceptible_places, susceptible_age, setting_contact_mat, place_n, beta):
+def compute_transmission(infectious_places, infectious_age, susceptible_places, susceptible_age, setting_contact_mat, place_n, beta, hiv_status_of_susceptible_inds, hiv_rr):
     exposed_boolean = np.zeros(susceptible_places.size, dtype = np.uint8)
     n = susceptible_age.size
     for i in prange(n):
@@ -79,6 +79,8 @@ def compute_transmission(infectious_places, infectious_age, susceptible_places, 
         inf_age_at_sus_place = infectious_age[infectious_places == sus_place]
         poisson_mu = -beta * setting_contact_mat[sus_age][inf_age_at_sus_place] * (1/place_n[sus_place])
         prob = 1 - np.exp(poisson_mu.sum())
+        if hiv_status_of_susceptible_inds[i] > 0:
+            prob = prob * hiv_rr
         if np.random.random() < prob:
             exposed_boolean[i] = 1
     return exposed_boolean
@@ -380,7 +382,14 @@ def get_popgrid(datadir, place, year):
     for d, district in enumerate(admin_id_arr.files):
         district_grid[np.isin(admin_grid, admin_id_arr[district])] = d + 1
         district_mapping[district] = d + 1
-    return popgrid[popgrid>0], popgrid_coords[popgrid>0], latlon[popgrid>0], district_grid[popgrid>0], district_mapping, {v:k for k, v in district_mapping.items()}
+    # sub districts
+    sub_district_grid = np.zeros(admin_grid.size, dtype=np.uint16)
+    sub_district_mapping = {}
+    sub_district_admin_id_arr = np.load(datadir + "/%s_admin_ids_level3.npz"%(place))
+    for d, subdistrict in enumerate(sub_district_admin_id_arr.files):
+        sub_district_grid[np.isin(admin_grid, sub_district_admin_id_arr[subdistrict])] = d + 1
+        sub_district_mapping[subdistrict] = d + 1
+    return popgrid[popgrid>0], popgrid_coords[popgrid>0], latlon[popgrid>0], district_grid[popgrid>0], district_mapping, {v:k for k, v in district_mapping.items()}, sub_district_grid[popgrid>0], sub_district_mapping
 
 def read_admin_geotiff(fpath, rescale_height, rescale_width):
     with rasterio.open(fpath) as src:

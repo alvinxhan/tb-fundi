@@ -45,6 +45,10 @@ class Sim():
         self.epidemic = sc.objdict()
         # probability of infection per contact
         self.epidemic.beta = pars.beta
+        # relative risk in increased susceptiblity of HIV individuals
+        self.epidemic.hiv_sus_rr = pars.hiv_sus_rr
+        # relative risk in increased mortality of HIV individuals
+        self.epidemic.hiv_dea_rr = pars.hiv_dea_rr
         # length of simulated epidemic
         self.epidemic.nweeks = pars.nweeks
         # external attack rate (per person per week)
@@ -59,7 +63,8 @@ class Sim():
         # initialize
         self.t = np.uint32(0)
         # assign initial states
-        self.assign_initial_states(pars.initial_state_dist, pars.initial_state_tau, pars.district_mptb_prevalence)
+        if pars.setup_initial_states > 0:
+            self.assign_initial_states(pars.initial_state_dist, pars.initial_state_tau, pars.district_mptb_prevalence)
 
         return
 
@@ -71,7 +76,7 @@ class Sim():
         print (self.t, np.unique(self.epidemic.curr_state, return_counts = True))
 
         while self.t < self.epidemic.nweeks + 1:
-            if self.epidemic.ext_attack_rate > 0:
+            if self.t < 52 and self.epidemic.ext_attack_rate > 0:
                 # external attack
                 self.external_attack()
             # update epidemic today
@@ -129,8 +134,9 @@ class Sim():
         if infectious_inds.size == 0:
             return
 
-        # get susceptibles
-        susceptible_inds = self.people.id[self.epidemic.curr_state == 0]
+        # get susceptibles and recovered
+        susceptible_inds = self.people.id[(self.epidemic.curr_state == 0)]
+
         if setting == 'school':
             susceptible_inds = susceptible_inds[(self.people.swstatus[susceptible_inds] >= 1)&(self.people.swstatus[susceptible_inds] < 3)]
         elif setting == 'workplace':
@@ -165,8 +171,10 @@ class Sim():
             susceptible_age = self.people.age[susceptible_inds]
             # get likelihood of commuting depending on age for each district
             infectious_age_commute_f = self.age_commute_f[self.people.district[infectious_inds] - 1, infectious_age]
+            # hiv status
+            hiv_status_of_susceptible_inds = self.people.hiv_status[susceptible_inds]
             # compute transmissions
-            exposed_boolean = utils.compute_rand_transmission(infectious_places, infectious_age, susceptible_places, susceptible_age, setting_contact_mat, infectious_age_commute_f, self.visitor_flux_prob, self.epidemic.beta)
+            exposed_boolean = utils.compute_rand_transmission(infectious_places, infectious_age, susceptible_places, susceptible_age, setting_contact_mat, infectious_age_commute_f, self.visitor_flux_prob, self.epidemic.beta, hiv_status_of_susceptible_inds, self.epidemic.hiv_sus_rr)
 
         else:
             # compute shortlisted susceptibles who are in the same swsplace as infectious individuals
@@ -176,19 +184,21 @@ class Sim():
                 return
             susceptible_places = susceptible_places[included_sus_mask > 0]
             susceptible_age = self.people.age[susceptible_inds]
-
+            # hiv status
+            hiv_status_of_susceptible_inds = self.people.hiv_status[susceptible_inds]
             # compute transmissions
-            exposed_boolean = utils.compute_transmission(infectious_places, infectious_age, susceptible_places, susceptible_age, setting_contact_mat, place_n, self.epidemic.beta)
+            exposed_boolean = utils.compute_transmission(infectious_places, infectious_age, susceptible_places, susceptible_age, setting_contact_mat, place_n, self.epidemic.beta, hiv_status_of_susceptible_inds, self.epidemic.hiv_sus_rr)
 
         exposed_persons = susceptible_inds[exposed_boolean > 0]
         self.exposed(exposed_persons)
-
+        # hello
         return
 
     def update_epidemic(self, death_bool):
         for state in [1, 2, 3, 4, 5]: # curr state infection, minimal, subclinical, clinical, recovered
             # get individuals in current state
             inds_in_curr_state = self.people.id[self.epidemic.curr_state == state]
+            hiv_status_of_inds_in_curr_state = self.people.hiv_status[self.epidemic.curr_state == state]
 
             if inds_in_curr_state.size > 0:
                 # get time since start of current state
@@ -203,6 +213,8 @@ class Sim():
                         continue
                     rate = self.state_transtion_rates[state, tstate]
                     next_state_p = 1 - np.exp(-rate * state_delta_t)
+                    if tstate == 6 and hiv_status_of_inds_in_curr_state.sum() > 0: # death probability for hiv individuals is increased
+                        next_state_p[hiv_status_of_inds_in_curr_state > 0] *= self.epidemic.hiv_dea_rr
                     next_state_of_inds[(np.random.random(next_state_p.size) < next_state_p)&(next_state_of_inds == state)] = tstate
 
                 # change state
@@ -244,17 +256,20 @@ class Sim():
             self.state_transtion_rates[i, j] = df.loc[(i,j), "rate_per_year"]/52.1429
 
     def assign_hiv_status(self, pars):
-        # assign HIV status (adults)
-        self.people.hiv_status = np.zeros(self.people.N, dtype=np.uint8)
-        adults_id = self.people.id[self.people.age >= 15]
-        adults_n = np.uint32(pars.hiv_prev_pars['adult_prev'] * adults_id.size)
-        self.people.hiv_status[np.random.choice(adults_id, adults_n, replace=False)] = 1
-        # assign HIV status to children
-        children_id = self.people.id[self.people.age < 15]
-        children_n = np.uint32(pars.hiv_prev_pars['child_adult_ratio'] * adults_n)
-        print ("{:,} adults (15+ y) and {:,} children (<15y) ({:.1f}% of population) are living with HIV".format(adults_n, children_n, 100*(adults_n+children_n)/self.people.N))
-        self.people.hiv_status[np.random.choice(children_id, children_n, replace=False)] = 1
+        # assign HIV status
+        hiv_prev = np.asarray(pars.hiv_prev_pars['hiv_prev'])
+        art_prev = np.asarray(pars.hiv_prev_pars['art_prev'])
 
+        self.people.hiv_status = np.zeros(self.people.N, dtype=np.uint8)
+        people_w_hiv_mask = np.random.random(self.people.N) < hiv_prev[self.people.age]
+        self.people.hiv_status[people_w_hiv_mask] = 1
+        print ("%.1f%% of population is living with HIV."%(100 * self.people.hiv_status.sum()/self.people.N))
+
+        # assign those with NOT on ART
+        art_mask = np.random.random(self.people.hiv_status.sum()) < art_prev[self.people.age[self.people.hiv_status > 0]]
+        hiv_infected_on_art = np.argwhere(self.people.hiv_status > 0).T[0][art_mask]
+        self.people.hiv_status[hiv_infected_on_art] = 0
+        print ("%.1f%% of population is living with HIV without ART."%(100 * self.people.hiv_status.sum()/self.people.N))
 
 # Population object
 class Pop():
@@ -265,7 +280,7 @@ class Pop():
         if pars.verbose > 0:
             print ("Creating population object for '{:}'.".format(pars.place.capitalize()))
         # read popgrid over the years
-        popgrid, popgrid_coords, latlon, district_grid, self.district_mapping, inv_district_mapping = utils.get_popgrid(pars.datadir, pars.place, pars.year)
+        popgrid, popgrid_coords, latlon, district_grid, self.district_mapping, inv_district_mapping, sub_district_grid, self.sub_district_mapping = utils.get_popgrid(pars.datadir, pars.place, pars.year)
 
         # initialise people
         self.people = sc.objdict()
@@ -311,6 +326,7 @@ class Pop():
         loc_idx_arr = loc_idx_arr[unique_populated_locs]
         self.latlon = latlon[loc_idx_arr,:]
         self.district_grid = district_grid[loc_idx_arr]
+        self.sub_district_grid = sub_district_grid[loc_idx_arr]
         self.loc_idx_arr = np.uint32(np.arange(unique_populated_locs.size))
         loc_idx_mapping = np.zeros(unique_populated_locs.max()+1, dtype=np.uint32)
         loc_idx_mapping[unique_populated_locs] = self.loc_idx_arr
